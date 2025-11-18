@@ -3,7 +3,7 @@
 
 A highly flexible interactive web-based tool for visualizing, editing, and managing YOLO format bounding box labels. Download and run the html file on your local system for 100% Privacy. No data leaves your server.
 
-## 🚀 [Launch Application](https://YOUR-USERNAME.github.io/yolo-label-editor/)
+## 🚀 [Launch Application](https://EliMahMD.github.io/yolo-label-editor/)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![No Dependencies](https://img.shields.io/badge/dependencies-none-green.svg)](https://github.com/yourusername/yolo-label-editor)
