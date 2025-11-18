@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLO Label Editor</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect } = React;
+
+        function YOLOLabelEditor() {
+          const [imagePairs, setImagePairs] = useState([]);
+          const [currentPairIndex, setCurrentPairIndex] = useState(0);
+          const [image, setImage] = useState(null);
+          const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
+          const [labels, setLabels] = useState('');
+          const [parsedLabels, setParsedLabels] = useState([]);
+          const [selectedBox, setSelectedBox] = useState(null);
+          const [labelVisibility, setLabelVisibility] = useState({});
+          const [outputPath, setOutputPath] = useState('');
+          const [classNames, setClassNames] = useState('');
+          const [classNamesArray, setClassNamesArray] = useState([]);
+          const [error, setError] = useState('');
+          const [isDragging, setIsDragging] = useState(false);
+          const [dragMode, setDragMode] = useState(null); // 'move', 'nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w'
+          const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+          const [originalBox, setOriginalBox] = useState(null);
+          const canvasRef = useRef(null);
+          const imgRef = useRef(null);
+
+          // Parse YOLO format labels
+          const parseLabels = (labelText, initVisibility = false) => {
+            try {
+              const lines = labelText.trim().split('\n').filter(line => line.trim());
+              const parsed = lines.map((line, index) => {
+                const parts = line.trim().split(/\s+/);
+                if (parts.length < 5) return null;
+                
+                return {
+                  id: index,
+                  classId: parseInt(parts[0]),
+                  x: parseFloat(parts[1]),
+                  y: parseFloat(parts[2]),
+                  width: parseFloat(parts[3]),
+                  height: parseFloat(parts[4]),
+                  rawLine: line
+                };
+              }).filter(Boolean);
+              
+              // Initialize visibility state (default: all hidden on upload)
+              if (initVisibility) {
+                const visibilityState = {};
+                parsed.forEach((_, index) => {
+                  visibilityState[index] = false;
+                });
+                setLabelVisibility(visibilityState);
+              }
+              
+              return parsed;
+            } catch (err) {
+              setError('Error parsing labels: ' + err.message);
+              return [];
+            }
+          };
+
+          // Parse class names from text input
+          const parseClassNames = (text) => {
+            if (!text.trim()) {
+              setClassNamesArray([]);
+              return;
+            }
+            const names = text.split('\n').map(name => name.trim()).filter(name => name);
+            setClassNamesArray(names);
+          };
+
+          // Get class name by class ID
+          const getClassName = (classId) => {
+            if (classNamesArray.length > 0 && classId < classNamesArray.length) {
+              return classNamesArray[classId];
+            }
+            return `Class ${classId}`;
+          };
+
+          // Get label display name (class name or box number)
+          const getLabelDisplayName = (label, index) => {
+            const className = getClassName(label.classId);
+            return className;
+          };
+
+          // Convert YOLO format to pixel coordinates
+          const yoloToPixel = (label, imgWidth, imgHeight) => {
+            const centerX = label.x * imgWidth;
+            const centerY = label.y * imgHeight;
+            const width = label.width * imgWidth;
+            const height = label.height * imgHeight;
+            
+            return {
+              x: centerX - width / 2,
+              y: centerY - height / 2,
+              width,
+              height
+            };
+          };
+
+          // Convert pixel coordinates back to YOLO format
+          const pixelToYolo = (x, y, width, height, imgWidth, imgHeight) => {
+            const centerX = (x + width / 2) / imgWidth;
+            const centerY = (y + height / 2) / imgHeight;
+            const w = width / imgWidth;
+            const h = height / imgHeight;
+            
+            // Clamp values between 0 and 1
+            return {
+              x: Math.max(0, Math.min(1, centerX)),
+              y: Math.max(0, Math.min(1, centerY)),
+              width: Math.max(0, Math.min(1, w)),
+              height: Math.max(0, Math.min(1, h))
+            };
+          };
+
+          // Draw image and bounding boxes on canvas
+          useEffect(() => {
+            if (!image || !canvasRef.current || !imgRef.current) return;
+
+            const canvas = canvasRef.current;
+            const ctx = canvas.getContext('2d');
+            const img = imgRef.current;
+
+            // Set canvas size to match image
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+
+            // Draw image
+            ctx.drawImage(img, 0, 0);
+
+            // Draw bounding boxes (only visible ones)
+            parsedLabels.forEach((label, index) => {
+              // Skip if label is not visible
+              if (!labelVisibility[index]) return;
+              
+              const box = yoloToPixel(label, canvas.width, canvas.height);
+              
+              // Set color based on selection
+              const isSelected = selectedBox === index;
+              ctx.strokeStyle = isSelected ? '#ef4444' : '#3b82f6';
+              ctx.lineWidth = isSelected ? 3 : 2;
+              ctx.fillStyle = isSelected ? 'rgba(239, 68, 68, 0.1)' : 'rgba(59, 130, 246, 0.1)';
+
+              // Draw rectangle
+              ctx.fillRect(box.x, box.y, box.width, box.height);
+              ctx.strokeRect(box.x, box.y, box.width, box.height);
+
+              // Draw label with class name
+              ctx.fillStyle = isSelected ? '#ef4444' : '#3b82f6';
+              ctx.font = '16px Arial';
+              const displayName = getClassName(label.classId);
+              ctx.fillText(displayName, box.x, box.y - 5);
+
+              // Draw resize handles for selected box
+              if (isSelected) {
+                const handleSize = 8;
+                ctx.fillStyle = '#ef4444';
+                
+                // Corner handles
+                ctx.fillRect(box.x - handleSize/2, box.y - handleSize/2, handleSize, handleSize); // NW
+                ctx.fillRect(box.x + box.width - handleSize/2, box.y - handleSize/2, handleSize, handleSize); // NE
+                ctx.fillRect(box.x - handleSize/2, box.y + box.height - handleSize/2, handleSize, handleSize); // SW
+                ctx.fillRect(box.x + box.width - handleSize/2, box.y + box.height - handleSize/2, handleSize, handleSize); // SE
+                
+                // Edge handles
+                ctx.fillRect(box.x + box.width/2 - handleSize/2, box.y - handleSize/2, handleSize, handleSize); // N
+                ctx.fillRect(box.x + box.width/2 - handleSize/2, box.y + box.height - handleSize/2, handleSize, handleSize); // S
+                ctx.fillRect(box.x - handleSize/2, box.y + box.height/2 - handleSize/2, handleSize, handleSize); // W
+                ctx.fillRect(box.x + box.width - handleSize/2, box.y + box.height/2 - handleSize/2, handleSize, handleSize); // E
+              }
+            });
+          }, [image, parsedLabels, selectedBox, imageDimensions, labelVisibility, classNamesArray]);
+
+          // Handle multiple image-label pairs upload
+          const handleMultipleFilesUpload = (e) => {
+            const files = Array.from(e.target.files);
+            
+            // Separate images and labels
+            const imageFiles = files.filter(f => 
+              f.name.endsWith('.nii.gz') || 
+              f.name.match(/\.(jpg|jpeg|png|gif|bmp|webp)$/i)
+            );
+            const labelFiles = files.filter(f => f.name.endsWith('.txt'));
+            
+            // Match files by basename
+            const pairs = [];
+            imageFiles.forEach(imgFile => {
+              // Get basename (without extension)
+              let basename = imgFile.name;
+              if (basename.endsWith('.nii.gz')) {
+                basename = basename.slice(0, -7);
+              } else {
+                basename = basename.replace(/\.[^.]+$/, '');
+              }
+              
+              // Find matching label file
+              const labelFile = labelFiles.find(lf => lf.name === basename + '.txt');
+              
+              if (labelFile) {
+                pairs.push({ imageFile: imgFile, labelFile: labelFile, basename: basename });
+              }
+            });
+            
+            if (pairs.length === 0) {
+              setError('No matching image-label pairs found. Make sure filenames match (e.g., image.nii.gz and image.txt)');
+              return;
+            }
+            
+            // Load all pairs
+            Promise.all(pairs.map(pair => loadPair(pair)))
+              .then(loadedPairs => {
+                setImagePairs(loadedPairs);
+                setCurrentPairIndex(0);
+                if (loadedPairs.length > 0) {
+                  loadCurrentPair(loadedPairs[0]);
+                }
+                setError('');
+              })
+              .catch(err => {
+                setError('Error loading files: ' + err.message);
+              });
+          };
+          
+          // Load a single pair
+          const loadPair = (pair) => {
+            return new Promise((resolve, reject) => {
+              const imageReader = new FileReader();
+              const labelReader = new FileReader();
+              
+              let imageData = null;
+              let labelData = null;
+              
+              imageReader.onload = (e) => {
+                imageData = e.target.result;
+                if (labelData !== null) {
+                  resolve({ ...pair, imageData, labelData });
+                }
+              };
+              
+              labelReader.onload = (e) => {
+                labelData = e.target.result;
+                if (imageData !== null) {
+                  resolve({ ...pair, imageData, labelData });
+                }
+              };
+              
+              imageReader.onerror = reject;
+              labelReader.onerror = reject;
+              
+              imageReader.readAsDataURL(pair.imageFile);
+              labelReader.readAsText(pair.labelFile);
+            });
+          };
+          
+          // Load current pair into editor
+          const loadCurrentPair = (pair) => {
+            setImage(pair.imageData);
+            setLabels(pair.labelData);
+            setParsedLabels(parseLabels(pair.labelData, true)); // true = initialize visibility to hidden
+            setSelectedBox(null);
+          };
+          
+          // Navigate between pairs
+          const goToPreviousPair = () => {
+            if (currentPairIndex > 0) {
+              const newIndex = currentPairIndex - 1;
+              setCurrentPairIndex(newIndex);
+              loadCurrentPair(imagePairs[newIndex]);
+            }
+          };
+          
+          const goToNextPair = () => {
+            if (currentPairIndex < imagePairs.length - 1) {
+              const newIndex = currentPairIndex + 1;
+              setCurrentPairIndex(newIndex);
+              loadCurrentPair(imagePairs[newIndex]);
+            }
+          };
+
+          // Handle label text change
+          const handleLabelChange = (e) => {
+            const newLabels = e.target.value;
+            setLabels(newLabels);
+            setParsedLabels(parseLabels(newLabels, false)); // false = don't reset visibility
+          };
+          
+          // Toggle visibility of a specific label
+          const toggleLabelVisibility = (index) => {
+            setLabelVisibility(prev => ({
+              ...prev,
+              [index]: !prev[index]
+            }));
+          };
+          
+          // Toggle all labels
+          const toggleAllLabels = (visible) => {
+            const newVisibility = {};
+            parsedLabels.forEach((_, index) => {
+              newVisibility[index] = visible;
+            });
+            setLabelVisibility(newVisibility);
+          };
+
+          // Download edited labels with output path
+          const downloadLabels = () => {
+            const filename = imagePairs.length > 0 
+              ? `${imagePairs[currentPairIndex].basename}.txt`
+              : 'labels.txt';
+            
+            const blob = new Blob([labels], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = outputPath ? `${outputPath}_${filename}` : filename;
+            a.click();
+            URL.revokeObjectURL(url);
+          };
+          
+          // Download all edited labels
+          const downloadAllLabels = () => {
+            if (imagePairs.length === 0) return;
+            
+            imagePairs.forEach((pair, index) => {
+              const labelContent = index === currentPairIndex ? labels : pair.labelData;
+              const blob = new Blob([labelContent], { type: 'text/plain' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = outputPath ? `${outputPath}_${pair.basename}.txt` : `${pair.basename}.txt`;
+              a.click();
+              URL.revokeObjectURL(url);
+            });
+          };
+
+          // Get mouse position on canvas
+          const getMousePos = (e) => {
+            if (!canvasRef.current) return { x: 0, y: 0 };
+            const canvas = canvasRef.current;
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return {
+              x: (e.clientX - rect.left) * scaleX,
+              y: (e.clientY - rect.top) * scaleY
+            };
+          };
+
+          // Check if mouse is on a resize handle
+          const getHandleAtPosition = (x, y, box) => {
+            const handleSize = 8;
+            const tolerance = handleSize;
+            
+            // Corner handles
+            if (Math.abs(x - box.x) < tolerance && Math.abs(y - box.y) < tolerance) return 'nw';
+            if (Math.abs(x - (box.x + box.width)) < tolerance && Math.abs(y - box.y) < tolerance) return 'ne';
+            if (Math.abs(x - box.x) < tolerance && Math.abs(y - (box.y + box.height)) < tolerance) return 'sw';
+            if (Math.abs(x - (box.x + box.width)) < tolerance && Math.abs(y - (box.y + box.height)) < tolerance) return 'se';
+            
+            // Edge handles
+            if (Math.abs(x - (box.x + box.width/2)) < tolerance && Math.abs(y - box.y) < tolerance) return 'n';
+            if (Math.abs(x - (box.x + box.width/2)) < tolerance && Math.abs(y - (box.y + box.height)) < tolerance) return 's';
+            if (Math.abs(x - box.x) < tolerance && Math.abs(y - (box.y + box.height/2)) < tolerance) return 'w';
+            if (Math.abs(x - (box.x + box.width)) < tolerance && Math.abs(y - (box.y + box.height/2)) < tolerance) return 'e';
+            
+            return null;
+          };
+
+          // Check if point is inside box
+          const isInsideBox = (x, y, box) => {
+            return x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height;
+          };
+
+          // Handle mouse down
+          const handleMouseDown = (e) => {
+            if (!canvasRef.current || selectedBox === null || !labelVisibility[selectedBox]) return;
+            
+            const pos = getMousePos(e);
+            const canvas = canvasRef.current;
+            const box = yoloToPixel(parsedLabels[selectedBox], canvas.width, canvas.height);
+            
+            // Check if clicking on a handle
+            const handle = getHandleAtPosition(pos.x, pos.y, box);
+            if (handle) {
+              setIsDragging(true);
+              setDragMode(handle);
+              setDragStart(pos);
+              setOriginalBox({ ...box });
+              return;
+            }
+            
+            // Check if clicking inside box for moving
+            if (isInsideBox(pos.x, pos.y, box)) {
+              setIsDragging(true);
+              setDragMode('move');
+              setDragStart(pos);
+              setOriginalBox({ ...box });
+            }
+          };
+
+          // Handle mouse move
+          const handleMouseMove = (e) => {
+            if (!canvasRef.current) return;
+            
+            const canvas = canvasRef.current;
+            const pos = getMousePos(e);
+            
+            // Update cursor based on position
+            if (selectedBox !== null && labelVisibility[selectedBox]) {
+              const box = yoloToPixel(parsedLabels[selectedBox], canvas.width, canvas.height);
+              const handle = getHandleAtPosition(pos.x, pos.y, box);
+              
+              if (handle) {
+                const cursors = {
+                  'nw': 'nw-resize', 'ne': 'ne-resize', 'sw': 'sw-resize', 'se': 'se-resize',
+                  'n': 'n-resize', 's': 's-resize', 'e': 'e-resize', 'w': 'w-resize'
+                };
+                canvas.style.cursor = cursors[handle];
+              } else if (isInsideBox(pos.x, pos.y, box)) {
+                canvas.style.cursor = 'move';
+              } else {
+                canvas.style.cursor = 'default';
+              }
+            } else {
+              canvas.style.cursor = 'default';
+            }
+            
+            // Handle dragging
+            if (!isDragging || !originalBox) return;
+            
+            const dx = pos.x - dragStart.x;
+            const dy = pos.y - dragStart.y;
+            
+            let newBox = { ...originalBox };
+            
+            if (dragMode === 'move') {
+              newBox.x = originalBox.x + dx;
+              newBox.y = originalBox.y + dy;
+            } else if (dragMode === 'nw') {
+              newBox.x = originalBox.x + dx;
+              newBox.y = originalBox.y + dy;
+              newBox.width = originalBox.width - dx;
+              newBox.height = originalBox.height - dy;
+            } else if (dragMode === 'ne') {
+              newBox.y = originalBox.y + dy;
+              newBox.width = originalBox.width + dx;
+              newBox.height = originalBox.height - dy;
+            } else if (dragMode === 'sw') {
+              newBox.x = originalBox.x + dx;
+              newBox.width = originalBox.width - dx;
+              newBox.height = originalBox.height + dy;
+            } else if (dragMode === 'se') {
+              newBox.width = originalBox.width + dx;
+              newBox.height = originalBox.height + dy;
+            } else if (dragMode === 'n') {
+              newBox.y = originalBox.y + dy;
+              newBox.height = originalBox.height - dy;
+            } else if (dragMode === 's') {
+              newBox.height = originalBox.height + dy;
+            } else if (dragMode === 'w') {
+              newBox.x = originalBox.x + dx;
+              newBox.width = originalBox.width - dx;
+            } else if (dragMode === 'e') {
+              newBox.width = originalBox.width + dx;
+            }
+            
+            // Ensure minimum size
+            if (newBox.width < 10) newBox.width = 10;
+            if (newBox.height < 10) newBox.height = 10;
+            
+            // Convert back to YOLO format and update
+            const yoloCoords = pixelToYolo(newBox.x, newBox.y, newBox.width, newBox.height, canvas.width, canvas.height);
+            
+            const newParsedLabels = [...parsedLabels];
+            newParsedLabels[selectedBox] = {
+              ...newParsedLabels[selectedBox],
+              ...yoloCoords
+            };
+            
+            setParsedLabels(newParsedLabels);
+            
+            // Update text representation
+            updateLabelsText(newParsedLabels);
+          };
+
+          // Handle mouse up
+          const handleMouseUp = () => {
+            setIsDragging(false);
+            setDragMode(null);
+            setOriginalBox(null);
+          };
+
+          // Update labels text from parsed labels
+          const updateLabelsText = (parsedLabelsList) => {
+            const newLabelsText = parsedLabelsList.map(label => 
+              `${label.classId} ${label.x.toFixed(6)} ${label.y.toFixed(6)} ${label.width.toFixed(6)} ${label.height.toFixed(6)}`
+            ).join('\n');
+            setLabels(newLabelsText);
+          };
+
+          // Handle canvas click to select box (when not dragging)
+          const handleCanvasClick = (e) => {
+            if (isDragging) return; // Don't change selection while dragging
+            if (!canvasRef.current) return;
+
+            const pos = getMousePos(e);
+            const canvas = canvasRef.current;
+
+            // Find clicked box (only among visible ones)
+            let clickedIndex = null;
+            parsedLabels.forEach((label, index) => {
+              if (!labelVisibility[index]) return; // Skip invisible labels
+              
+              const box = yoloToPixel(label, canvas.width, canvas.height);
+              if (isInsideBox(pos.x, pos.y, box)) {
+                clickedIndex = index;
+              }
+            });
+
+            setSelectedBox(clickedIndex);
+          };
+          
+          // Count visible labels
+          const visibleCount = Object.values(labelVisibility).filter(Boolean).length;
+
+          // Lucide React icons as inline SVG components
+          const Upload = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+          );
+
+          const Save = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+            </svg>
+          );
+
+          const Edit2 = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+          );
+
+          const Eye = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+          );
+
+          const EyeOff = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+            </svg>
+          );
+
+          const AlertCircle = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          );
+
+          const Folder = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+          );
+
+          const ChevronLeft = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          );
+
+          const ChevronRight = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          );
+
+          return (
+            <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 text-white p-6">
+              <div className="max-w-7xl mx-auto">
+                <div className="mb-8 text-center">
+                  <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+                    YOLO Label Editor
+                  </h1>
+                  <p className="text-slate-300">Upload your image-label pairs to visualize and edit bounding boxes</p>
+                </div>
+
+                {error && (
+                  <div className="mb-6 bg-red-500/20 border border-red-500 rounded-lg p-4 flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                    <span className="text-red-200">{error}</span>
+                  </div>
+                )}
+
+                {/* Upload Section */}
+                <div className="mb-6">
+                  <div className="bg-slate-800/50 backdrop-blur rounded-lg p-6 border border-slate-700">
+                    <label className="flex flex-col items-center gap-3 cursor-pointer hover:bg-slate-700/30 transition-colors rounded-lg p-4 border-2 border-dashed border-slate-600">
+                      <Upload className="w-8 h-8 text-blue-400" />
+                      <span className="text-slate-300">Upload Multiple Image-Label Pairs</span>
+                      <span className="text-xs text-slate-400">Select both .nii.gz/.jpg/.png images and matching .txt label files</span>
+                      <input 
+                        type="file" 
+                        multiple 
+                        accept=".nii.gz,.jpg,.jpeg,.png,.gif,.bmp,.webp,.txt" 
+                        onChange={handleMultipleFilesUpload} 
+                        className="hidden" 
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {/* Navigation and Output Path */}
+                {imagePairs.length > 0 && (
+                  <div className="mb-6 bg-slate-800/50 backdrop-blur rounded-lg p-4 border border-slate-700">
+                    <div className="flex items-center justify-between gap-4 flex-wrap">
+                      <div className="flex items-center gap-4">
+                        <button
+                          onClick={goToPreviousPair}
+                          disabled={currentPairIndex === 0}
+                          className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:opacity-50 rounded-lg transition-colors"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                          Previous
+                        </button>
+                        
+                        <span className="text-slate-300 font-medium">
+                          {currentPairIndex + 1} / {imagePairs.length} - {imagePairs[currentPairIndex].basename}
+                        </span>
+                        
+                        <button
+                          onClick={goToNextPair}
+                          disabled={currentPairIndex === imagePairs.length - 1}
+                          className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:opacity-50 rounded-lg transition-colors"
+                        >
+                          Next
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                      </div>
+                      
+                      <div className="flex items-center gap-3">
+                        <Folder className="w-5 h-5 text-cyan-400" />
+                        <input
+                          type="text"
+                          value={outputPath}
+                          onChange={(e) => setOutputPath(e.target.value)}
+                          placeholder="Output path"
+                          className="px-3 py-2 bg-slate-900 text-slate-200 rounded-lg border border-slate-700 focus:border-cyan-500 focus:outline-none text-sm"
+                        />
+                        <button
+                          onClick={downloadLabels}
+                          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                        >
+                          <Save className="w-4 h-4" />
+                          Save Current
+                        </button>
+                        <button
+                          onClick={downloadAllLabels}
+                          className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg transition-colors"
+                        >
+                          <Save className="w-4 h-4" />
+                          Save All
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Class Names Input */}
+                <div className="mb-6 bg-slate-800/50 backdrop-blur rounded-lg p-6 border border-slate-700">
+                  <h3 className="text-lg font-semibold mb-3 text-slate-200">Class Names (Optional)</h3>
+                  <p className="text-xs text-slate-400 mb-3">
+                    Enter class names, one per line. Line 0 = Class ID 0, Line 1 = Class ID 1, etc.
+                    If provided, labels will show these names instead of "Class 0", "Class 1", etc.
+                  </p>
+                  <textarea
+                    value={classNames}
+                    onChange={(e) => {
+                      setClassNames(e.target.value);
+                      parseClassNames(e.target.value);
+                    }}
+                    placeholder="person&#10;car&#10;dog&#10;cat&#10;..."
+                    className="w-full h-32 bg-slate-900 text-slate-200 rounded-lg p-4 font-mono text-sm border border-slate-700 focus:border-cyan-500 focus:outline-none resize-none"
+                    spellCheck="false"
+                  />
+                  {classNamesArray.length > 0 && (
+                    <div className="mt-2 text-xs text-green-400">
+                      ✓ {classNamesArray.length} class names loaded
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Image Display */}
+                  <div className="bg-slate-800/50 backdrop-blur rounded-lg p-6 border border-slate-700">
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-xl font-semibold flex items-center gap-2">
+                        <Eye className="w-5 h-5 text-blue-400" />
+                        Image Preview
+                      </h2>
+                      {parsedLabels.length > 0 && (
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm text-slate-400">
+                            {visibleCount} / {parsedLabels.length} visible
+                          </span>
+                          <button
+                            onClick={() => toggleAllLabels(true)}
+                            className="px-3 py-1 text-xs bg-green-600 hover:bg-green-700 rounded transition-colors"
+                          >
+                            Show All
+                          </button>
+                          <button
+                            onClick={() => toggleAllLabels(false)}
+                            className="px-3 py-1 text-xs bg-red-600 hover:bg-red-700 rounded transition-colors"
+                          >
+                            Hide All
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div className="relative bg-slate-900 rounded-lg overflow-hidden" style={{ minHeight: '400px' }}>
+                      {image ? (
+                        <>
+                          <img
+                            ref={imgRef}
+                            src={image}
+                            alt="Uploaded"
+                            className="hidden"
+                            onLoad={(e) => {
+                              setImageDimensions({
+                                width: e.target.naturalWidth,
+                                height: e.target.naturalHeight
+                              });
+                            }}
+                          />
+                          <canvas
+                            ref={canvasRef}
+                            onClick={handleCanvasClick}
+                            onMouseDown={handleMouseDown}
+                            onMouseMove={handleMouseMove}
+                            onMouseUp={handleMouseUp}
+                            onMouseLeave={handleMouseUp}
+                            className="w-full h-auto cursor-pointer"
+                            style={{ maxHeight: '600px', objectFit: 'contain' }}
+                          />
+                          {selectedBox !== null && (
+                            <div className="mt-2 text-sm text-blue-400">
+                              Selected: Box {selectedBox + 1} ({getClassName(parsedLabels[selectedBox].classId)})
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="flex items-center justify-center h-96 text-slate-500">
+                          Upload image-label pairs to begin
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Label Editor */}
+                  <div className="bg-slate-800/50 backdrop-blur rounded-lg p-6 border border-slate-700">
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-xl font-semibold flex items-center gap-2">
+                        <Edit2 className="w-5 h-5 text-cyan-400" />
+                        YOLO Labels
+                      </h2>
+                    </div>
+
+                    <textarea
+                      value={labels}
+                      onChange={handleLabelChange}
+                      placeholder="Upload files or paste YOLO format labels...&#10;&#10;Format: class_id center_x center_y width height&#10;Example: 0 0.5 0.5 0.3 0.4"
+                      className="w-full h-64 bg-slate-900 text-slate-200 rounded-lg p-4 font-mono text-sm border border-slate-700 focus:border-cyan-500 focus:outline-none resize-none"
+                      spellCheck="false"
+                    />
+
+                    <div className="mt-4 text-xs text-slate-400 space-y-1">
+                      <p>📝 YOLO Format: class_id center_x center_y width height</p>
+                      <p>📏 All coordinates are normalized (0-1)</p>
+                      <p>🖱️ Click on a box to select it</p>
+                      <p>✋ Drag box to move, drag corners/edges to resize</p>
+                      <p>👁️ Toggle visibility for individual labels below</p>
+                    </div>
+
+                    {parsedLabels.length > 0 && (
+                      <div className="mt-4 bg-slate-900 rounded-lg p-4 max-h-64 overflow-y-auto">
+                        <h3 className="text-sm font-semibold mb-2 text-slate-300">Label Visibility Controls:</h3>
+                        {parsedLabels.map((label, index) => (
+                          <div
+                            key={index}
+                            className={`text-xs p-2 rounded mb-1 flex items-center justify-between transition-colors ${
+                              selectedBox === index
+                                ? 'bg-red-500/20 border border-red-500'
+                                : 'bg-slate-800'
+                            }`}
+                          >
+                            <div className="flex-1">
+                              <span className="font-semibold">Box {index + 1} ({getClassName(label.classId)}):</span> 
+                              x: {label.x.toFixed(4)} | y: {label.y.toFixed(4)} | 
+                              w: {label.width.toFixed(4)} | h: {label.height.toFixed(4)}
+                            </div>
+                            <button
+                              onClick={() => toggleLabelVisibility(index)}
+                              className={`ml-3 p-1 rounded transition-colors ${
+                                labelVisibility[index]
+                                  ? 'bg-green-600 hover:bg-green-700'
+                                  : 'bg-slate-700 hover:bg-slate-600'
+                              }`}
+                            >
+                              {labelVisibility[index] ? (
+                                <Eye className="w-4 h-4" />
+                              ) : (
+                                <EyeOff className="w-4 h-4" />
+                              )}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<YOLOLabelEditor />);
+    </script>
+</body>
+</html>
